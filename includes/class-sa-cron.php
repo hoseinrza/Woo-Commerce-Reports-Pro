@@ -26,12 +26,14 @@ class SA_Cron {
 
 		$rows = SA_Data::compute_live_day_rows( $date );
 
-		if ( empty( $rows ) ) {
-			return;
-		}
-
 		global $wpdb;
-		$table = $wpdb->prefix . SA_SNAPSHOT_TABLE;
+		$table            = $wpdb->prefix . SA_SNAPSHOT_TABLE;
+		$categories_table = $wpdb->prefix . SA_SNAPSHOT_CATEGORIES_TABLE;
+
+		// Re-synced on every run for this date, so re-snapshotting never
+		// leaves stale category rows behind (e.g. a product's category
+		// changed after the first snapshot for that day).
+		$wpdb->delete( $categories_table, array( 'snapshot_date' => $date ), array( '%s' ) );
 
 		foreach ( $rows as $row ) {
 			$wpdb->query(
@@ -53,6 +55,25 @@ class SA_Cron {
 					$row['gross_revenue']
 				)
 			); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+
+			foreach ( self::parse_category_ids( $row['category_ids'] ) as $category_id ) {
+				$wpdb->query(
+					$wpdb->prepare(
+						"INSERT IGNORE INTO {$categories_table} (snapshot_date, product_id, category_id) VALUES (%s, %d, %d)",
+						$date,
+						$row['product_id'],
+						$category_id
+					)
+				); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			}
 		}
+	}
+
+	private static function parse_category_ids( $category_ids ) {
+		if ( empty( $category_ids ) ) {
+			return array();
+		}
+
+		return array_filter( array_map( 'intval', explode( ',', $category_ids ) ) );
 	}
 }

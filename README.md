@@ -50,7 +50,14 @@ assets/js/                     Vendored Chart.js build
 
 ### How reporting stays fast on large stores
 
-Every night, `SA_Cron` aggregates the previous day's orders into a small `wp_sa_daily_sales` table (one row per product per day). Historical report ranges are read straight from that table instead of re-scanning the full orders history. Only the current, not-yet-snapshotted day is computed live from WooCommerce orders via `wc_get_orders()`, keeping that live query bounded to a single day's data. The plugin declares compatibility with WooCommerce's High-Performance Order Storage (HPOS) and works whether orders live in the legacy posts table or the custom order tables.
+- **Nightly pre-aggregation.** `SA_Cron` aggregates each day's orders into a small `wp_sa_daily_sales` table (one row per product per day). Historical report ranges are read straight from that table instead of re-scanning the full orders history.
+- **SQL-side aggregation.** Summary totals, the trend chart, top products, and category breakdowns are all computed with `SUM`/`GROUP BY`/`ORDER BY`/`LIMIT` in the query itself, so only the rows actually needed (days in range, top-N products) ever leave the database — not every product/day row in the range.
+- **Indexed category filtering.** Category membership is normalized into `wp_sa_daily_sales_categories` (one row per product/category/day, indexed on `(category_id, snapshot_date)`), so filtering a report by category is an index lookup rather than a `FIND_IN_SET()` scan over every snapshot row.
+- **Reuses WooCommerce's own analytics tables.** Computing "today" (the day not yet snapshotted) reads WooCommerce's own indexed `wc_order_product_lookup` / `wc_order_stats` tables — already maintained incrementally by WooCommerce core as orders change status — with a single indexed query, instead of loading every `WC_Order` object for the day and summing line items in PHP. On installs without those tables, it falls back to iterating orders directly, still bounded to a single day.
+- **Batched lookups.** Product and category names for the dashboard tables are resolved with one batched query each, not one query per row.
+- **Response caching.** A completed report is cached (via the WordPress object cache) for 5 minutes per date range/category combination, so concurrent dashboard views by different staff don't each trigger a full recompute.
+
+The plugin declares compatibility with WooCommerce's High-Performance Order Storage (HPOS) and works whether orders live in the legacy posts table or the custom order tables.
 
 ## Roadmap
 

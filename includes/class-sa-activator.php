@@ -1,6 +1,7 @@
 <?php
 /**
- * Fired on plugin activation.
+ * Fired on plugin activation, and re-run on upgrade to keep the schema
+ * in sync (dbDelta is safe to run repeatedly).
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -15,17 +16,38 @@ class SA_Activator {
 	}
 
 	/**
-	 * Create the custom table used to store daily sales snapshots.
-	 * Snapshotting keeps reporting fast on large stores by avoiding
-	 * repeated aggregation over the full orders table.
+	 * Run on every request (cheap - bails immediately) so that stores
+	 * that upgrade the plugin without deactivating/reactivating still
+	 * get new tables and indexes created.
+	 */
+	public static function maybe_upgrade() {
+		if ( get_option( 'sa_db_version' ) === SA_VERSION ) {
+			return;
+		}
+
+		self::create_tables();
+		self::schedule_events();
+	}
+
+	/**
+	 * Create the custom tables used for daily sales snapshots.
+	 *
+	 * sa_daily_sales holds one row per product per day so reporting
+	 * doesn't need to re-aggregate the full orders history.
+	 *
+	 * sa_daily_sales_categories normalizes each product's category
+	 * membership into its own indexed row, so category-filtered
+	 * reports can use an indexed lookup instead of a FIND_IN_SET()
+	 * scan over a CSV column - the difference between an index seek
+	 * and a full table scan on a store with years of order history.
 	 */
 	private static function create_tables() {
 		global $wpdb;
 
-		$table_name      = $wpdb->prefix . SA_SNAPSHOT_TABLE;
 		$charset_collate = $wpdb->get_charset_collate();
 
-		$sql = "CREATE TABLE {$table_name} (
+		$sales_table = $wpdb->prefix . SA_SNAPSHOT_TABLE;
+		$sales_sql   = "CREATE TABLE {$sales_table} (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			snapshot_date DATE NOT NULL,
 			product_id BIGINT UNSIGNED NOT NULL,
@@ -40,8 +62,20 @@ class SA_Activator {
 			KEY product_id (product_id)
 		) {$charset_collate};";
 
+		$categories_table = $wpdb->prefix . SA_SNAPSHOT_CATEGORIES_TABLE;
+		$categories_sql   = "CREATE TABLE {$categories_table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			snapshot_date DATE NOT NULL,
+			product_id BIGINT UNSIGNED NOT NULL,
+			category_id BIGINT UNSIGNED NOT NULL,
+			PRIMARY KEY  (id),
+			UNIQUE KEY sa_date_product_category (snapshot_date, product_id, category_id),
+			KEY sa_category_date (category_id, snapshot_date)
+		) {$charset_collate};";
+
 		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-		dbDelta( $sql );
+		dbDelta( $sales_sql );
+		dbDelta( $categories_sql );
 
 		update_option( 'sa_db_version', SA_VERSION );
 	}

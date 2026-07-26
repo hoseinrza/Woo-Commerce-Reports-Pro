@@ -23,6 +23,7 @@ define( 'SA_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SA_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'SA_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
 define( 'SA_SNAPSHOT_TABLE', 'sa_daily_sales' );
+define( 'SA_SNAPSHOT_CATEGORIES_TABLE', 'sa_daily_sales_categories' );
 
 /**
  * Declare compatibility with WooCommerce High-Performance Order Storage (HPOS).
@@ -78,6 +79,8 @@ function sa_init_plugin() {
 	}
 
 	load_plugin_textdomain( 'sales-analytics', false, dirname( SA_PLUGIN_BASENAME ) . '/languages' );
+
+	SA_Activator::maybe_upgrade();
 
 	require_once SA_PLUGIN_DIR . 'includes/class-sa-data.php';
 	require_once SA_PLUGIN_DIR . 'includes/class-sa-cron.php';
