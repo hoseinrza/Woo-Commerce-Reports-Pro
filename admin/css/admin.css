@@ -1,0 +1,78 @@
+.sa-dashboard .sa-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 16px;
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	padding: 16px;
+	margin: 16px 0;
+}
+
+.sa-dashboard .sa-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.sa-dashboard .sa-field label {
+	font-weight: 600;
+}
+
+.sa-dashboard .sa-field-actions {
+	flex-direction: row;
+	gap: 8px;
+}
+
+.sa-dashboard .sa-summary-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	gap: 16px;
+	margin-bottom: 16px;
+}
+
+.sa-dashboard .sa-card {
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	border-left: 4px solid #7f54b3;
+	padding: 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.sa-dashboard .sa-card-label {
+	color: #646970;
+	font-size: 13px;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+}
+
+.sa-dashboard .sa-card-value {
+	font-size: 24px;
+	font-weight: 600;
+}
+
+.sa-dashboard .sa-panel {
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	padding: 16px;
+	margin-bottom: 16px;
+}
+
+.sa-dashboard .sa-columns {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+	gap: 16px;
+}
+
+.sa-dashboard .sa-panel-half {
+	margin-bottom: 0;
+}
+
+.sa-dashboard .sa-empty {
+	color: #646970;
+	font-style: italic;
+	padding: 24px 0;
+	text-align: center;
+}
