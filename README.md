@@ -57,6 +57,10 @@ assets/js/                     Vendored Chart.js build
 - **Batched lookups.** Product and category names for the dashboard tables are resolved with one batched query each, not one query per row.
 - **Response caching.** A completed report is cached (via the WordPress object cache) for 5 minutes per date range/category combination, so concurrent dashboard views by different staff don't each trigger a full recompute.
 
+### Historical backfill
+
+The snapshot table only fills in going forward from the nightly cron, so on activation (or right after a schema-changing upgrade) it starts empty. A background job (`SA_Cron::run_backfill_batch`, triggered via `wp_schedule_single_event`) snapshots a batch of historical days at a time, starting from the store's earliest order, and reschedules itself every few seconds until it catches up to yesterday — without blocking any page load, regardless of how many years of order history the store has. While it's running, a notice on the Sales Analytics admin page shows how far the backfill has progressed.
+
 The plugin declares compatibility with WooCommerce's High-Performance Order Storage (HPOS) and works whether orders live in the legacy posts table or the custom order tables.
 
 ## Roadmap

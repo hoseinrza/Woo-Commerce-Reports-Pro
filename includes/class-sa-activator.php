@@ -13,12 +13,13 @@ class SA_Activator {
 	public static function activate() {
 		self::create_tables();
 		self::schedule_events();
+		self::maybe_schedule_backfill();
 	}
 
 	/**
 	 * Run on every request (cheap - bails immediately) so that stores
 	 * that upgrade the plugin without deactivating/reactivating still
-	 * get new tables and indexes created.
+	 * get new tables, indexes, and a historical backfill.
 	 */
 	public static function maybe_upgrade() {
 		if ( get_option( 'sa_db_version' ) === SA_VERSION ) {
@@ -27,6 +28,28 @@ class SA_Activator {
 
 		self::create_tables();
 		self::schedule_events();
+		self::maybe_schedule_backfill();
+	}
+
+	/**
+	 * Kick off the background job that snapshots every day from the
+	 * store's earliest order up to yesterday, so historical orders
+	 * placed before the plugin started collecting data (or before a
+	 * schema upgrade) still show up in reports - the snapshot table
+	 * otherwise only ever fills in going forward from the nightly cron.
+	 *
+	 * Uses the raw option name (matching SA_Cron::BACKFILL_COMPLETE_OPTION)
+	 * rather than the class constant: this runs from the activation hook,
+	 * before class-sa-cron.php has necessarily been require'd.
+	 */
+	private static function maybe_schedule_backfill() {
+		if ( get_option( 'sa_backfill_complete' ) ) {
+			return;
+		}
+
+		if ( ! wp_next_scheduled( 'sa_backfill_batch_event' ) ) {
+			wp_schedule_single_event( time() + 10, 'sa_backfill_batch_event' );
+		}
 	}
 
 	/**

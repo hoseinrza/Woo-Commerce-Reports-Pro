@@ -1,8 +1,10 @@
 <?php
 /**
- * Scheduled task that snapshots the previous day's sales into the
- * sa_daily_sales table so historical reporting doesn't need to
- * re-aggregate raw orders on every page load.
+ * Scheduled tasks that keep the sa_daily_sales snapshot table in sync:
+ * a nightly job for the previous day, and a self-rescheduling batch
+ * job that backfills history for orders that existed before the
+ * plugin started snapshotting (activation, or an upgrade that changed
+ * the schema).
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -11,12 +13,16 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class SA_Cron {
 
+	const BACKFILL_CURSOR_OPTION   = 'sa_backfill_cursor';
+	const BACKFILL_COMPLETE_OPTION = 'sa_backfill_complete';
+
 	public function __construct() {
 		add_action( 'sa_daily_snapshot_event', array( $this, 'run_snapshot' ) );
+		add_action( 'sa_backfill_batch_event', array( $this, 'run_backfill_batch' ) );
 	}
 
 	/**
-	 * Snapshot yesterday's sales. Safe to run more than once for the
+	 * Snapshot a single day's sales. Safe to run more than once for the
 	 * same day since rows are upserted by (snapshot_date, product_id).
 	 */
 	public function run_snapshot( $date = null ) {
@@ -66,6 +72,51 @@ class SA_Cron {
 					)
 				); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 			}
+		}
+	}
+
+	/**
+	 * Snapshot a batch of historical days, then reschedule itself
+	 * shortly after until it reaches yesterday. Runs in the background
+	 * via WP-Cron so it never blocks a page load, no matter how many
+	 * years of order history a store has.
+	 */
+	public function run_backfill_batch() {
+		if ( get_option( self::BACKFILL_COMPLETE_OPTION ) ) {
+			return;
+		}
+
+		$yesterday = date( 'Y-m-d', strtotime( current_time( 'Y-m-d' ) . ' -1 day' ) );
+
+		$cursor = get_option( self::BACKFILL_CURSOR_OPTION );
+		if ( ! $cursor ) {
+			$cursor = SA_Data::get_earliest_order_date();
+			if ( ! $cursor ) {
+				update_option( self::BACKFILL_COMPLETE_OPTION, 1 );
+				return;
+			}
+		}
+
+		if ( $cursor > $yesterday ) {
+			update_option( self::BACKFILL_COMPLETE_OPTION, 1 );
+			delete_option( self::BACKFILL_CURSOR_OPTION );
+			return;
+		}
+
+		$batch_size = apply_filters( 'sa_backfill_batch_size', 15 );
+		$date       = $cursor;
+
+		for ( $i = 0; $i < $batch_size && $date <= $yesterday; $i++ ) {
+			$this->run_snapshot( $date );
+			$date = date( 'Y-m-d', strtotime( $date . ' +1 day' ) );
+		}
+
+		if ( $date > $yesterday ) {
+			update_option( self::BACKFILL_COMPLETE_OPTION, 1 );
+			delete_option( self::BACKFILL_CURSOR_OPTION );
+		} else {
+			update_option( self::BACKFILL_CURSOR_OPTION, $date );
+			wp_schedule_single_event( time() + 5, 'sa_backfill_batch_event' );
 		}
 	}
 

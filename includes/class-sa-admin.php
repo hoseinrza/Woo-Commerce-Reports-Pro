@@ -14,6 +14,7 @@ class SA_Admin {
 	public function __construct() {
 		add_action( 'admin_menu', array( $this, 'register_menu' ) );
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
+		add_action( 'admin_notices', array( $this, 'render_backfill_notice' ) );
 	}
 
 	public function register_menu() {
@@ -58,5 +59,41 @@ class SA_Admin {
 	public function render_dashboard() {
 		$categories = SA_Data::get_all_product_categories();
 		include SA_PLUGIN_DIR . 'admin/views/dashboard.php';
+	}
+
+	/**
+	 * Let the store owner know historical orders are still being
+	 * imported, instead of leaving them wondering why past dates look
+	 * empty on the dashboard while the backfill job runs in the
+	 * background.
+	 */
+	public function render_backfill_notice() {
+		$screen = get_current_screen();
+		if ( ! $screen || 'toplevel_page_' . self::PAGE_SLUG !== $screen->id ) {
+			return;
+		}
+
+		if ( get_option( 'sa_backfill_complete' ) ) {
+			return;
+		}
+
+		$cursor = get_option( 'sa_backfill_cursor' );
+		?>
+		<div class="notice notice-info">
+			<p>
+			<?php
+			if ( $cursor ) {
+				printf(
+					/* translators: %s: date the backfill has reached so far. */
+					esc_html__( 'Sales Analytics is still importing historical orders (caught up through %s so far). Older dates will keep filling in over the next few minutes.', 'sales-analytics' ),
+					esc_html( $cursor )
+				);
+			} else {
+				esc_html_e( 'Sales Analytics is importing your historical orders in the background. This dashboard will include your full order history shortly.', 'sales-analytics' );
+			}
+			?>
+			</p>
+		</div>
+		<?php
 	}
 }

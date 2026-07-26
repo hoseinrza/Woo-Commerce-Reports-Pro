@@ -312,6 +312,53 @@ class SA_Data {
 	}
 
 	/**
+	 * The date of the store's earliest reportable order, used to know
+	 * how far back the historical backfill needs to go. Null if the
+	 * store has no reportable orders yet.
+	 */
+	public static function get_earliest_order_date() {
+		if ( self::lookup_tables_available() ) {
+			global $wpdb;
+			$stats = $wpdb->prefix . 'wc_order_stats';
+
+			$statuses = array_map(
+				function ( $status ) {
+					return preg_replace( '/^wc-/', '', $status );
+				},
+				self::get_reportable_statuses()
+			);
+
+			$placeholders = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
+
+			$date = $wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT MIN(DATE(date_created)) FROM {$stats} WHERE status IN ({$placeholders})", // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+					$statuses
+				)
+			);
+
+			return $date ?: null;
+		}
+
+		$orders = wc_get_orders(
+			array(
+				'status'  => self::get_reportable_statuses(),
+				'orderby' => 'date',
+				'order'   => 'ASC',
+				'limit'   => 1,
+				'return'  => 'objects',
+			)
+		);
+
+		if ( empty( $orders ) ) {
+			return null;
+		}
+
+		$date_created = $orders[0]->get_date_created();
+		return $date_created ? $date_created->date( 'Y-m-d' ) : null;
+	}
+
+	/**
 	 * EXISTS clause against the normalized category table, used instead
 	 * of FIND_IN_SET() on the CSV category_ids column so category
 	 * filters can use the (category_id, snapshot_date) index rather
