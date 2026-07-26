@@ -24,7 +24,17 @@ class SA_Data {
 	 * @param int    $category_id 0 for all categories.
 	 * @return array{summary: array, trend: array, top_products: array, categories: array}
 	 */
+	const CACHE_GROUP = 'sales_analytics';
+	const CACHE_TTL   = 300; // 5 minutes: several store managers loading the same default range shouldn't each trigger a full recompute.
+
 	public static function get_report( $start_date, $end_date, $category_id = 0 ) {
+		$cache_key = "report:{$start_date}:{$end_date}:{$category_id}";
+
+		$cached = wp_cache_get( $cache_key, self::CACHE_GROUP );
+		if ( false !== $cached ) {
+			return $cached;
+		}
+
 		list( $snapshot_start, $snapshot_end, $live_date ) = self::split_range( $start_date, $end_date );
 
 		$live_rows = $live_date ? self::compute_live_day_rows( $live_date, $category_id ) : array();
@@ -33,12 +43,16 @@ class SA_Data {
 		$top_products = self::get_top_products( $snapshot_start, $snapshot_end, $category_id, $live_rows, $live_date );
 		$categories   = self::get_categories( $snapshot_start, $snapshot_end, $category_id, $live_rows, $live_date );
 
-		return array(
+		$report = array(
 			'summary'      => self::summary_from_daily( $daily ),
 			'trend'        => self::trend_from_daily( $daily, $start_date, $end_date ),
 			'top_products' => $top_products,
 			'categories'   => $categories,
 		);
+
+		wp_cache_set( $cache_key, $report, self::CACHE_GROUP, self::CACHE_TTL );
+
+		return $report;
 	}
 
 	/**
@@ -73,21 +87,21 @@ class SA_Data {
 			global $wpdb;
 			$table = $wpdb->prefix . SA_SNAPSHOT_TABLE;
 
-			$sql  = "SELECT snapshot_date,
-						SUM(net_revenue) AS net_revenue,
-						SUM(gross_revenue) AS gross_revenue,
-						SUM(items_sold) AS items_sold,
-						MAX(orders_count) AS orders_count
-					 FROM {$table}
-					 WHERE snapshot_date BETWEEN %s AND %s";
+			$sql  = "SELECT s.snapshot_date,
+						SUM(s.net_revenue) AS net_revenue,
+						SUM(s.gross_revenue) AS gross_revenue,
+						SUM(s.items_sold) AS items_sold,
+						MAX(s.orders_count) AS orders_count
+					 FROM {$table} s
+					 WHERE s.snapshot_date BETWEEN %s AND %s";
 			$args = array( $snapshot_start, $snapshot_end );
 
 			if ( $category_id ) {
-				$sql   .= ' AND FIND_IN_SET(%d, category_ids)';
+				$sql   .= ' AND ' . self::category_exists_clause();
 				$args[] = $category_id;
 			}
 
-			$sql .= ' GROUP BY snapshot_date';
+			$sql .= ' GROUP BY s.snapshot_date';
 
 			$results = $wpdb->get_results( $wpdb->prepare( $sql, $args ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 
@@ -128,10 +142,93 @@ class SA_Data {
 	}
 
 	/**
-	 * Compute rows for a single day directly from WooCommerce orders.
-	 * Used for "today" only, so the cost stays bounded to one day's orders.
+	 * Compute per-product rows for a single day. Used both for "today"
+	 * (the not-yet-snapshotted day) and by the nightly cron job.
+	 *
+	 * WooCommerce already maintains its own indexed analytics tables
+	 * (wc_order_product_lookup / wc_order_stats, present on WC 6.0+)
+	 * that are updated incrementally as orders change status - reading
+	 * them is a single indexed GROUP BY query regardless of how many
+	 * orders the store has that day. That's used whenever available.
+	 * Loading every WC_Order object for the day and summing their line
+	 * items in PHP only happens as a fallback for sites where those
+	 * tables are missing or disabled.
 	 */
 	public static function compute_live_day_rows( $date, $category_id = 0 ) {
+		if ( self::lookup_tables_available() ) {
+			return self::compute_day_rows_from_lookup_tables( $date, $category_id );
+		}
+
+		return self::compute_day_rows_from_orders( $date, $category_id );
+	}
+
+	/**
+	 * Fast path: aggregate directly from WooCommerce's own analytics
+	 * lookup tables with a single indexed query, joining product
+	 * categories in the same query instead of a per-product lookup.
+	 */
+	private static function compute_day_rows_from_lookup_tables( $date, $category_id = 0 ) {
+		global $wpdb;
+
+		$product_lookup = $wpdb->prefix . 'wc_order_product_lookup';
+		$stats          = $wpdb->prefix . 'wc_order_stats';
+
+		$statuses = array_map(
+			function ( $status ) {
+				return preg_replace( '/^wc-/', '', $status );
+			},
+			self::get_reportable_statuses()
+		);
+
+		$status_placeholders = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
+
+		$sql = "SELECT pl.product_id,
+					SUM(pl.product_qty) AS items_sold,
+					SUM(pl.product_net_revenue) AS net_revenue,
+					SUM(pl.product_gross_revenue) AS gross_revenue,
+					COUNT(DISTINCT pl.order_id) AS orders_count,
+					GROUP_CONCAT(DISTINCT tt.term_id) AS category_ids
+				FROM {$product_lookup} pl
+				INNER JOIN {$stats} os ON os.order_id = pl.order_id
+				LEFT JOIN {$wpdb->term_relationships} tr ON tr.object_id = pl.product_id
+				LEFT JOIN {$wpdb->term_taxonomy} tt ON tt.term_taxonomy_id = tr.term_taxonomy_id AND tt.taxonomy = 'product_cat'
+				WHERE os.status IN ({$status_placeholders})
+					AND os.date_created BETWEEN %s AND %s
+				GROUP BY pl.product_id";
+
+		$args = array_merge( $statuses, array( $date . ' 00:00:00', $date . ' 23:59:59' ) );
+
+		$results = $wpdb->get_results( $wpdb->prepare( $sql, $args ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+
+		$rows = array();
+
+		foreach ( $results as $row ) {
+			$cat_ids = $row['category_ids'] ? array_map( 'intval', explode( ',', $row['category_ids'] ) ) : array();
+
+			if ( $category_id && ! in_array( (int) $category_id, $cat_ids, true ) ) {
+				continue;
+			}
+
+			$rows[] = array(
+				'snapshot_date' => $date,
+				'product_id'    => (int) $row['product_id'],
+				'category_ids'  => implode( ',', $cat_ids ),
+				'items_sold'    => (int) $row['items_sold'],
+				'net_revenue'   => (float) $row['net_revenue'],
+				'gross_revenue' => (float) $row['gross_revenue'],
+				'orders_count'  => (int) $row['orders_count'],
+			);
+		}
+
+		return $rows;
+	}
+
+	/**
+	 * Fallback path: iterate WC_Order objects and their line items.
+	 * Only used when WooCommerce's analytics lookup tables aren't
+	 * available, so cost is still bounded to a single day's orders.
+	 */
+	private static function compute_day_rows_from_orders( $date, $category_id = 0 ) {
 		$orders = wc_get_orders(
 			array(
 				'status'       => self::get_reportable_statuses(),
@@ -188,10 +285,48 @@ class SA_Data {
 	}
 
 	/**
+	 * Whether WooCommerce's own analytics lookup tables exist on this
+	 * install. Checked once per request.
+	 */
+	private static function lookup_tables_available() {
+		static $available = null;
+
+		if ( null === $available ) {
+			global $wpdb;
+
+			$product_lookup = $wpdb->prefix . 'wc_order_product_lookup';
+			$stats          = $wpdb->prefix . 'wc_order_stats';
+
+			$available = (bool) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $product_lookup ) )
+				&& (bool) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $stats ) );
+		}
+
+		return $available;
+	}
+
+	/**
 	 * Order statuses considered as "sales" for reporting purposes.
 	 */
 	public static function get_reportable_statuses() {
 		return apply_filters( 'sa_reportable_order_statuses', array( 'wc-processing', 'wc-completed' ) );
+	}
+
+	/**
+	 * EXISTS clause against the normalized category table, used instead
+	 * of FIND_IN_SET() on the CSV category_ids column so category
+	 * filters can use the (category_id, snapshot_date) index rather
+	 * than scanning every snapshot row.
+	 */
+	private static function category_exists_clause() {
+		global $wpdb;
+		$categories_table = $wpdb->prefix . SA_SNAPSHOT_CATEGORIES_TABLE;
+
+		return "EXISTS (
+			SELECT 1 FROM {$categories_table} c
+			WHERE c.snapshot_date = s.snapshot_date
+				AND c.product_id = s.product_id
+				AND c.category_id = %d
+		)";
 	}
 
 	private static function summary_from_daily( array $by_day ) {
@@ -251,17 +386,17 @@ class SA_Data {
 			global $wpdb;
 			$table = $wpdb->prefix . SA_SNAPSHOT_TABLE;
 
-			$sql  = "SELECT product_id, SUM(items_sold) AS items_sold, SUM(net_revenue) AS net_revenue
-					 FROM {$table}
-					 WHERE snapshot_date BETWEEN %s AND %s";
+			$sql  = "SELECT s.product_id, SUM(s.items_sold) AS items_sold, SUM(s.net_revenue) AS net_revenue
+					 FROM {$table} s
+					 WHERE s.snapshot_date BETWEEN %s AND %s";
 			$args = array( $snapshot_start, $snapshot_end );
 
 			if ( $category_id ) {
-				$sql   .= ' AND FIND_IN_SET(%d, category_ids)';
+				$sql   .= ' AND ' . self::category_exists_clause();
 				$args[] = $category_id;
 			}
 
-			$sql   .= ' GROUP BY product_id ORDER BY net_revenue DESC LIMIT %d';
+			$sql   .= ' GROUP BY s.product_id ORDER BY net_revenue DESC LIMIT %d';
 			$args[] = $limit;
 
 			$results = $wpdb->get_results( $wpdb->prepare( $sql, $args ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
@@ -325,17 +460,17 @@ class SA_Data {
 			global $wpdb;
 			$table = $wpdb->prefix . SA_SNAPSHOT_TABLE;
 
-			$sql  = "SELECT product_id, category_ids, SUM(items_sold) AS items_sold, SUM(net_revenue) AS net_revenue
-					 FROM {$table}
-					 WHERE snapshot_date BETWEEN %s AND %s";
+			$sql  = "SELECT s.product_id, s.category_ids, SUM(s.items_sold) AS items_sold, SUM(s.net_revenue) AS net_revenue
+					 FROM {$table} s
+					 WHERE s.snapshot_date BETWEEN %s AND %s";
 			$args = array( $snapshot_start, $snapshot_end );
 
 			if ( $category_id ) {
-				$sql   .= ' AND FIND_IN_SET(%d, category_ids)';
+				$sql   .= ' AND ' . self::category_exists_clause();
 				$args[] = $category_id;
 			}
 
-			$sql .= ' GROUP BY product_id, category_ids';
+			$sql .= ' GROUP BY s.product_id, s.category_ids';
 
 			$product_rows = $wpdb->get_results( $wpdb->prepare( $sql, $args ), ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 		}
